@@ -1,0 +1,750 @@
+---
+title: "CalFresh Participation Rates in California"
+author: "Moises Evangelista"
+date: "Prepared `r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    fig_caption: yes
+    fig_crop: no
+  html_document: default
+  word_document: default
+subtitle: Estimating program participation using U.S. Census data
+fontsize: 11pt
+header-includes:
+   - \usepackage{hyperref}
+   - \hypersetup{colorlinks, linkcolor=black,urlcolor=blue}
+  
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(cache = TRUE, echo = FALSE, message = FALSE, warning = FALSE, include = FALSE,
+                      #dpi = 500
+                      dev = "cairo_pdf"
+)
+
+rm(list = ls(all = TRUE)) #start with empty workspace
+
+startTime <- Sys.time() # start the clock
+
+library(data.table)
+library(tidyverse)
+library(sf)
+library(ggrepel) # functions to repel overlapping text label
+# library(RJDBC)
+# library(tidycensus)
+library(scales)
+
+setwd("~/GitHub/CF_Participation") 
+
+# load("~/abbFileName.RData")
+
+```
+
+\newcommand\blfootnote[1]{%
+  \begingroup
+  \renewcommand\thefootnote{}\footnote{#1}%
+  \addtocounter{footnote}{-1}%
+  \endgroup
+}
+
+
+
+
+
+```{r pdfTable, cache = TRUE}
+
+library(tabulizer)
+
+paths <- dir(full.names = TRUE,
+             pattern = "*.pdf$") %>% 
+  .[grepl("PAI2013", .)] 
+
+out <- extract_tables(paths)   # Extract the table from PDF
+
+# steps <- plyr::ldply(out[c(2,3)], data.frame) 
+# 
+# defs <- plyr::ldply(out[c(4)], data.frame)
+
+SNAP_ProgAccessIndexCalc2013 <- plyr::ldply(out[c(5)], data.frame) %>% 
+  setNames(c("State Annual SNAP","Annual SNAP Participants","Annual FDPIR Participants",
+             "Disaster Assistance","Adjusted Annual SNAP Participants",
+             "Adjusted Monthly SNAP Participants","ACS 125% Poverty Count",
+             "CA SSI Adjustment","Monthly FDPIR Participants",
+             "Adjusted Poverty Count", "2013 PAI","2013 PAI Rank",
+             "2012 PAI","Improvement","Improvement Rank")) %>% 
+    setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) 
+
+
+rm(list = c("columnNames","out"))
+
+```
+
+```{r getCensusData}
+
+# get data from here:
+# https://factfinder.census.gov/faces/nav/jsf/pages/download_center.xhtml#none
+
+# https://www.census.gov/programs-surveys/acs/guidance/estimates.html
+# https://www.prb.org/whatsahouseholdwhatsafamily/
+# http://katiejolly.io/blog/2018-01-22/heat-reports-boston
+
+# temp <- unzip('aff_download_2013_5yr.zip', exdir = "./aff_download_2013_5yr")
+#  
+# zipFiles <- list.files() %>%  .[grepl("aff_download", .)] %>%  .[grepl("\\.zip", .)]
+# 
+# for (i in 1:length(zipFiles)) {
+# 
+# unzip(zipFiles[i], exdir = zipFiles[i] %>% sub("\\.zip", "", .))
+# 
+# }
+
+# rm(list = ls(all = TRUE)) #start with empty workspace
+
+metaData <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("_metadata", .)] %>% 
+  .[!grepl("CA_Counties|CA_Tracts", .)] %>% 
+  map_df( fread, stringsAsFactors = TRUE, .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("_metadata", .)] %>% 
+              .[!grepl("CA_Counties|CA_Tracts", .)] %>% 
+              basename() %>% gsub("ACS_|_metadata\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2))
+
+View(metaData)
+
+unique(metaData$Name) %>% as.vector() %>% gsub(".*([A-z]{1}[0-9]{4,5}).*", "\\1", .) %>% unique() %>% sort
+
+stS1703_SlctChrcPeplPvrtLast12Mnth <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("with_ann", .)] %>% 
+  .[grepl("S1703", .)] %>% 
+  .[!grepl("CA_Counties|CA_Tracts", .)] %>% 
+  map_df( fread, stringsAsFactors = TRUE, .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("with_ann", .)] %>% 
+              .[grepl("S1703", .)] %>% 
+              .[!grepl("CA_Counties|CA_Tracts", .)] %>% 
+              basename() %>% gsub("ACS_|_with_ann\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2)) %>% 
+  select(GEO.id:`GEO.display-label`,Name, HC01_EST_VC01:HC01_MOE_VC01,
+         HC04_EST_VC01:HC04_MOE_VC01) %>% 
+  filter(!grepl("--",`GEO.display-label`))
+
+listOfAttr <-  paste0(names(stS1703_SlctChrcPeplPvrtLast12Mnth), " = ",
+                      stS1703_SlctChrcPeplPvrtLast12Mnth[1,] %>% as.vector())
+
+
+stS1703_SlctChrcPeplPvrtLast12Mnth <- stS1703_SlctChrcPeplPvrtLast12Mnth %>% 
+  #setNames(.[1,] %>% as.character()) %>% 
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  mutate_at(vars(HC01ESTVC01:HC04MOEVC01),
+            funs(as.numeric(as.character(.)))) %>% 
+  filter(!is.na(HC01ESTVC01)) %>% 
+  mutate(popUnder125PcntPovrtyLevl = HC01ESTVC01*(HC04ESTVC01/100),
+         Yr = gsub(".*([0-9]{2}_[0-9]{1}[A-z]{2}).*", "\\1", Name)) %>% 
+  setattr(., "comment", listOfAttr)
+
+summary(stS1703_SlctChrcPeplPvrtLast12Mnth)
+str(stS1703_SlctChrcPeplPvrtLast12Mnth)
+attributes(stS1703_SlctChrcPeplPvrtLast12Mnth)
+
+# to validate use table 5 from here
+# https://www.census.gov/content/dam/Census/library/publications/2017/acs/acsbr16-01.pdf
+# how to calc MOE
+# https://www.census.gov/content/dam/Census/programs-surveys/acs/guidance/training-presentations/20170419_MOE.pdf
+
+
+stS2201_FoodStmp <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("with_ann", .)] %>% 
+  .[grepl("S2201", .)] %>% 
+              .[!grepl("CA_Counties|CA_Tracts", .)] %>% 
+  map_df( fread, stringsAsFactors = TRUE, .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("with_ann", .)] %>% 
+              .[grepl("S2201", .)] %>% 
+              .[!grepl("CA_Counties|CA_Tracts", .)] %>% 
+              basename() %>% gsub("ACS_|_with_ann\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2)) %>% 
+  select(GEO.id:`GEO.display-label`,Name, HC02_EST_VC01:HC02_MOE_VC01,
+         HC01_MOE_VC01,HC01_EST_VC01,
+         HC03_EST_VC01,HC03_MOE_VC01
+  ) %>% 
+  filter(!grepl("--",`GEO.display-label`))
+
+listOfAttr <-  paste0(names(stS2201_FoodStmp), " = ",
+                      stS2201_FoodStmp[1,] %>% as.vector())
+
+listOfAttr2 <-  paste0(names(stS2201_FoodStmp), " = ",
+                       stS2201_FoodStmp[54,] %>% as.vector())
+
+stS2201_FoodStmp <- stS2201_FoodStmp %>% 
+  #setNames(.[1,] %>% as.character()) %>% 
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  mutate_at(vars(HC02ESTVC01:HC03MOEVC01),
+            funs(as.numeric(as.character(.)))) %>% 
+  # filter(!is.na(HC02ESTVC01)) %>%
+  mutate(Yr = gsub(".*([0-9]{2}_[0-9]{1}[A-z]{2}).*", "\\1", Name),
+         Final_Est_HH_ReceivingFS = ifelse(Yr == "13_5YR", HC02ESTVC01, HC03ESTVC01),
+         Final_MOE_HH_ReceivingFS = ifelse(Yr == "13_5YR", HC02MOEVC01, HC03MOEVC01)) %>% 
+  select(GEOid:Name, Yr, Final_Est_HH_ReceivingFS:Final_MOE_HH_ReceivingFS) %>% 
+  setattr(., "comment", listOfAttr) %>% 
+  setattr(., "comment2", listOfAttr2) 
+
+summary(stS2201_FoodStmp)
+str(stS2201_FoodStmp)
+attributes(stS2201_FoodStmp)
+
+# Kansas  2013 PAI  315942/511227  # participants over poverty count
+# DC 2013 PAI      144881/140534
+
+StateCombo <- stS1703_SlctChrcPeplPvrtLast12Mnth %>% 
+  left_join(stS2201_FoodStmp,
+            by = c("GEOid", "GEOdisplaylabel","GEOid2","Yr")) %>%
+  mutate(ParticipantsOverPoverty = Final_Est_HH_ReceivingFS/popUnder125PcntPovrtyLevl) %>% 
+  filter(GEOid2 != "72") %>% 
+  # group_by(Yr) %>% 
+  mutate(StateRank = dense_rank(desc(ParticipantsOverPoverty))) %>% 
+  select(GEOid, GEOid2, GEOdisplaylabel,StateRank) %>% 
+  # spread(Yr , StateRank) %>% 
+  left_join( SNAP_ProgAccessIndexCalc2013 %>% 
+               select(GEOdisplaylabel = StateAnnualSNAP, PAIRank2013 = `2013PAIRank`) ) %>% 
+  mutate(PAIRank2013 = as.numeric(as.character(PAIRank2013))) %>% 
+  ungroup() %>% 
+  mutate(PAIRank2013 = ifelse( GEOid2 == "56" & is.na(PAIRank2013), 51, PAIRank2013)) %>% 
+  gather(key = Metric, value = Value, -c(GEOid , GEOid2, GEOdisplaylabel)) %>% 
+  mutate_if(is.character, as.factor)
+
+rm(list = setdiff(ls(), c("SNAP_ProgAccessIndexCalc2013","StateCombo")))
+
+
+```
+
+
+```{r importCensusDataAtCounty, eval = TRUE}
+
+caS1703_SlctChrcPeplPvrtLast12Mnth <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("with_ann", .)] %>% 
+  .[grepl("S1703", .)] %>% 
+  .[grepl("_CA_Counties", .)] %>% 
+  map_df( fread, stringsAsFactors = TRUE, .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("with_ann", .)] %>% 
+              .[grepl("S1703", .)] %>% 
+              .[grepl("_CA_Counties", .)] %>% 
+              basename() %>% gsub("ACS_|_with_ann\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2)) %>% 
+  select(GEO.id:`GEO.display-label`,Name, HC01_EST_VC01:HC01_MOE_VC01,
+         HC04_EST_VC01:HC04_MOE_VC01) %>% 
+  filter(!grepl("--",`GEO.display-label`))
+
+listOfAttr <-  paste0(names(caS1703_SlctChrcPeplPvrtLast12Mnth), " = ",
+                      caS1703_SlctChrcPeplPvrtLast12Mnth[1,] %>% as.vector())
+
+caS1703_SlctChrcPeplPvrtLast12Mnth <- caS1703_SlctChrcPeplPvrtLast12Mnth %>% 
+  #setNames(.[1,] %>% as.character()) %>% 
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  mutate_at(vars(HC01ESTVC01:HC04MOEVC01),
+            funs(as.numeric(as.character(.)))) %>% 
+  filter(!is.na(HC01ESTVC01)) %>% 
+  mutate(popUnder125PcntPovrtyLevl = HC01ESTVC01*(HC04ESTVC01/100),
+         Yr = gsub(".*([0-9]{2}_[0-9]{1}[A-z]{2}).*", "\\1", Name)) %>% 
+  setattr(., "comment", listOfAttr)
+
+summary(caS1703_SlctChrcPeplPvrtLast12Mnth)
+str(caS1703_SlctChrcPeplPvrtLast12Mnth)
+attributes(caS1703_SlctChrcPeplPvrtLast12Mnth)
+
+caS2201_FoodStmp <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("with_ann", .)] %>% 
+  .[grepl("S2201", .)] %>% 
+  .[grepl("_CA_Counties", .)] %>% 
+  map_df( fread, stringsAsFactors = TRUE, .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("with_ann", .)] %>% 
+              .[grepl("S2201", .)] %>% 
+              .[grepl("_CA_Counties", .)] %>% 
+              basename() %>% gsub("ACS_|_with_ann\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2)) %>% 
+  select(GEO.id:`GEO.display-label`,Name, HC02_EST_VC01:HC02_MOE_VC01,
+         HC01_MOE_VC01,HC01_EST_VC01,
+         HC03_EST_VC01,HC03_MOE_VC01
+  ) %>% 
+  filter(!grepl("--",`GEO.display-label`))
+
+listOfAttr <-  paste0(names(caS2201_FoodStmp), " = ",
+                      caS2201_FoodStmp[1,] %>% as.vector())
+
+listOfAttr2 <-  paste0(names(caS2201_FoodStmp), " = ",
+                       caS2201_FoodStmp[54,] %>% as.vector())
+
+caS2201_FoodStmp <- caS2201_FoodStmp %>% 
+  #setNames(.[1,] %>% as.character()) %>% 
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  mutate_at(vars(HC02ESTVC01:HC03MOEVC01),
+            funs(as.numeric(as.character(.)))) %>% 
+  # filter(!is.na(HC02ESTVC01)) %>%
+  mutate(Yr = gsub(".*([0-9]{2}_[0-9]{1}[A-z]{2}).*", "\\1", Name),
+         Final_Est_HH_ReceivingFS = ifelse(Yr == "13_5YR", HC02ESTVC01, HC03ESTVC01),
+         Final_MOE_HH_ReceivingFS = ifelse(Yr == "13_5YR", HC02MOEVC01, HC03MOEVC01)) %>% 
+  select(GEOid:Name, Yr, Final_Est_HH_ReceivingFS:Final_MOE_HH_ReceivingFS) %>% 
+  setattr(., "comment", listOfAttr) %>% 
+  setattr(., "comment2", listOfAttr2) 
+
+summary(caS2201_FoodStmp)
+str(caS2201_FoodStmp)
+attributes(caS2201_FoodStmp)
+
+CountiesCombo <- caS1703_SlctChrcPeplPvrtLast12Mnth %>% 
+  full_join(caS2201_FoodStmp,
+            by = c("GEOid", "GEOdisplaylabel","GEOid2","Yr")) %>%
+  mutate(ParticipantsOverPoverty = Final_Est_HH_ReceivingFS/popUnder125PcntPovrtyLevl) %>% 
+  group_by(Yr) %>% 
+  mutate(CountyRank = dense_rank(desc(ParticipantsOverPoverty))) %>% 
+  select(GEOid, GEOid2, GEOdisplaylabel, Yr,ParticipantsOverPoverty, CountyRank) %>% 
+  filter(GEOid2 != "Id2")
+
+```
+
+```{r importTractData, eval = FALSE}
+
+la_trS1701SlctChrcPeplPvrtLast12Mnth <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("with_ann", .)] %>% 
+  .[grepl("S1701", .)] %>% 
+  .[grepl("Tract/", .)] %>% 
+  map_df( fread,  .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("with_ann", .)] %>% 
+              .[grepl("S1701", .)] %>% 
+              .[grepl("Tract/", .)] %>% 
+              basename() %>% gsub("ACS_|_with_ann\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2)) %>% 
+  select(GEO.id:`GEO.display-label`,Name, HC01_EST_VC01:HC01_MOE_VC01,
+         HC01_EST_VC49:HC01_MOE_VC49,
+         HC01_EST_VC53:HC01_MOE_VC53) %>% 
+  filter(!grepl("--",`GEO.display-label`))
+
+listOfAttr <- paste0(names(la_trS1701SlctChrcPeplPvrtLast12Mnth), " = ",
+                     la_trS1701SlctChrcPeplPvrtLast12Mnth[1,] %>% as.vector())
+
+listOfAttr2 <- paste0(names(la_trS1701SlctChrcPeplPvrtLast12Mnth), " = ",
+                      la_trS1701SlctChrcPeplPvrtLast12Mnth[2348,])
+
+la_trS1701SlctChrcPeplPvrtLast12Mnth <- la_trS1701SlctChrcPeplPvrtLast12Mnth %>% 
+  #setNames(.[1,] %>% as.character()) %>% 
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  mutate_at(vars(HC01ESTVC01:HC01MOEVC53),
+            funs(as.numeric(.))) %>% 
+  # filter(!is.na(HC02ESTVC01)) %>%
+  mutate(Yr = gsub(".*([0-9]{2}_[0-9]{1}[A-z]{2}).*", "\\1", Name),
+         Final_Est_IndvLowr125Pcnt = ifelse(Yr == "13_5YR", HC01ESTVC49, HC01ESTVC53),
+         Final_MOE_IndvLowr125Pcnt = ifelse(Yr == "13_5YR", HC01MOEVC49, HC01MOEVC53 )) %>% 
+  select(GEOid:Name, Yr, Final_Est_IndvLowr125Pcnt:Final_MOE_IndvLowr125Pcnt) %>% 
+  filter(!is.na(Final_Est_IndvLowr125Pcnt)) %>% 
+  setattr(., "comment", listOfAttr) %>% 
+  setattr(., "comment2", listOfAttr2) 
+
+summary(la_trS1701SlctChrcPeplPvrtLast12Mnth)
+str(la_trS1701SlctChrcPeplPvrtLast12Mnth)
+attributes(la_trS1701SlctChrcPeplPvrtLast12Mnth)
+
+la_trS2201_FoodStmp <- dir(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("with_ann", .)] %>% 
+  .[grepl("S2201", .)] %>% 
+  .[grepl("Tract/", .)] %>% 
+  map_df( fread, .id = "file") %>% 
+  left_join(dir(full.names = TRUE, recursive = TRUE) %>%
+              .[grepl("with_ann", .)] %>% 
+              .[grepl("S2201", .)] %>% 
+              .[grepl("County/", .)] %>% 
+              basename() %>% gsub("ACS_|_with_ann\\.csv","",.) %>% 
+              as.data.frame() %>% 
+              rownames_to_column(var = "file") %>% 
+              select(file, Name = 2)) %>% 
+  select(GEO.id:`GEO.display-label`,Name,
+         HC01_EST_VC01:HC01_MOE_VC01,
+         HC02_EST_VC01:HC02_MOE_VC01,
+         HC03_EST_VC01:HC03_MOE_VC01)
+
+listOfAttr <- paste0(names(la_trS2201_FoodStmp), " = ",
+                     la_trS2201_FoodStmp[1,] %>% as.vector())
+
+listOfAttr2 <-  paste0(names(la_trS2201_FoodStmp), " = ",
+                       la_trS2201_FoodStmp[2348,] %>% as.vector())
+
+la_trS2201_FoodStmp <- la_trS2201_FoodStmp %>% 
+  #setNames(.[1,] %>% as.character()) %>% 
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  mutate_at(vars(HC02ESTVC01:HC03MOEVC01),
+            funs(as.numeric(.))) %>% 
+  # filter(!is.na(HC02ESTVC01)) %>%
+  mutate(Yr = gsub(".*([0-9]{2}_[0-9]{1}[A-z]{2}).*", "\\1", Name),
+         Final_Est_HH_ReceivingFS = ifelse(Yr == "13_5YR", HC02ESTVC01, HC03ESTVC01),
+         Final_MOE_HH_ReceivingFS = ifelse(Yr == "13_5YR", HC02MOEVC01, HC03MOEVC01)) %>% 
+  select(GEOid:Name, Yr, Final_Est_HH_ReceivingFS:Final_MOE_HH_ReceivingFS) %>% 
+  setattr(., "comment", listOfAttr) %>% 
+  setattr(., "comment2", listOfAttr2) 
+
+summary(la_trS2201_FoodStmp)
+str(la_trS2201_FoodStmp)
+attributes(la_trS2201_FoodStmp)
+
+LACountyCombo <- la_trS1701SlctChrcPeplPvrtLast12Mnth %>% 
+  left_join(la_trS2201_FoodStmp,
+            by = c("GEOid", "GEOdisplaylabel","GEOid2","Yr")) %>%
+  mutate(ParticipantsOverPoverty = Final_Est_HH_ReceivingFS/Final_Est_IndvLowr125Pcnt) %>% 
+  group_by(Yr) %>% ungroup() %>% 
+  mutate(CountyRank = dense_rank(desc(ParticipantsOverPoverty))) %>% 
+  select(GEOid, GEOid2, GEOdisplaylabel, Yr, Final_Est_IndvLowr125Pcnt,
+         Final_MOE_IndvLowr125Pcnt, Final_Est_HH_ReceivingFS, Final_MOE_HH_ReceivingFS,
+         ParticipantsOverPoverty, CountyRank) %>% 
+  mutate_if(is.character, as.factor)
+
+# change the order of metrics
+
+# levels(LACountyCombo$Metric)
+# 
+# LACountyCombo$Metric <- ordered(LACountyCombo$Metric, levels = c( "PAIRank2013", "13_5YR","16_5YR")) # dput(as.character(NewLevels)))
+# 
+# levels(LACountyCombo$Metric)
+
+```
+
+The Program Access Index (PAI) is one of the measures the U.S. Department of Agriculture (USDA) Food and Nutrition Service (FNS) uses to reward States for high performance in the administration of the Supplemental Nutrition Assistance Program (SNAP).  Below is the PAI equation from 
+[here](https://cfpa.net/CalFresh/ExternalPublications/State-PAI-USDA-2014.pdf)
+
+
+\begin{equation} \label{eq:pai}
+\text{PAI} =  \frac{a-c}{b-d-e}
+\end{equation}
+
+where \eqref{eq:pai} $a$ is CalFresh Participants, $b$ is Individuals with Income <125\% of poverty, $c$ is Disaster CalFresh Program Participants, $d$ is Food Distribution Program on Indian Reservations (FDPIR), and $e$ is Supplemental Security Income (SSI) recipients with Income < 125\% of poverty.
+
+In this analysis the PAI formula \eqref{eq:pai_short} was modified where $a$ CalFresh Participants is divided over $b$ Individuals with Income <125\% of poverty:
+
+\begin{equation} \label{eq:pai_short}
+\text{Modified PAI} =  \frac{a}{b}
+\end{equation}
+
+The PAI formula was modified because variables for Disaster CalFresh Program Participants, Food Distribution Program on Indian Reservations (FDPIR) and Supplemental Security Income (SSI) recipients with Income < 125\% of poverty were not available.
+
+
+\newpage
+
+```{r plotStatesComparsion, fig.height=9, fig.width=8, message=FALSE, warning=FALSE, include= FALSE, eval = FALSE}
+
+ggplot() +
+  geom_line(size = 0.1,
+            data =  StateCombo %>%  select(Metric, Value, NewGEOdisplaylabel = GEOdisplaylabel),
+            aes(x = Metric, y = Value, group = NewGEOdisplaylabel),
+            #color = as.factor(NewOffice)),
+            color = "gray",
+            alpha = .4) +
+  geom_line(data = StateCombo, 
+            aes(Metric, Value, group = GEOdisplaylabel),
+            alpha = 1,
+            size = .5,
+            color = "black") +
+  geom_point(data = StateCombo, 
+             aes(Metric, Value),
+             alpha = .8,
+             size = 1,
+             shape = 21, fill = NA, stroke = .5,
+             color = "gray") +
+  geom_label(data = StateCombo,
+             aes(Metric , Value, label = prettyNum(Value, big.mark = ",")  ),
+             # vjust = -1, 
+             # hjust = 1,
+             size = 1,
+             # nudge_x = 0.01,
+             alpha = 1/2,
+             label.size = 0.1,
+             label.padding = unit(0.05, "lines"),
+             color = "black") +
+  scale_y_continuous(labels = scales::comma) +
+  facet_wrap( ~ GEOdisplaylabel) +
+  guides(colour = "none") +
+  ggthemes::theme_tufte() +
+  theme(strip.text.x = element_text(size = 5, 
+                                    #colour = labelColor, 
+                                    angle = 00,
+                                    hjust = 0#, lineheight = .5
+  ),
+  legend.position="bottom",
+  axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = "Food Stamps participation rank by State",
+       subtitle = "Program Access Index for 2013 (PAI) vs Estimated for 2013 and 2016",
+       caption = "Source: PAI for 2013 from https://www.cwda.org/sites/main/files/file-attachments/pai2013.pdf \nU.S. Census Bureau, 2012-2016 American Community Survey 5-Year Estimates")
+
+
+```
+
+
+\blfootnote{The Pearson correlation coefficient, r, are in the range from -1 to +1, where +1 indicates the strongest possible agreement and -1 the strongest possible disagreement.}
+
+
+
+```{r getMaps, eval = TRUE}
+
+download.file('http://www2.census.gov/geo/tiger/GENZ2016/shp/cb_2016_us_county_500k.zip', 'county.zip',
+              quiet = TRUE)
+
+temp <- unzip('county.zip')
+
+projections <- st_proj_info(type = "proj")
+
+sf_Ca_Counties <- st_read("cb_2016_us_county_500k.shp") %>% 
+  filter(STATEFP == "06")
+
+sp_Ca_Counties <- as(sf_Ca_Counties, 'Spatial')
+
+xdata <- sp_Ca_Counties@data
+
+sp_Ca_Counties <- rgeos::gSimplify(sp_Ca_Counties, tol = 1/100000, topologyPreserve = TRUE)
+
+sp_Ca_Counties <- rgeos::gBuffer(sp_Ca_Counties, byid = TRUE, width = 0)
+
+sp_Ca_Counties <- sp::SpatialPolygonsDataFrame(sp_Ca_Counties, xdata)
+
+frt_Ca_Counties <- broom:::tidy(sp_Ca_Counties, region = "NAME") %>% 
+  left_join(sf_Ca_Counties %>% select(GEOID, NAME)%>% st_set_geometry(NULL), 
+            by = c("id" = "NAME"))
+
+t <- frt_Ca_Counties %>% left_join(CountiesCombo, by = c("GEOID"= "GEOid2")) %>% 
+  select(id, GEOID, Yr) %>% distinct()
+  
+```
+
+```{r getCensusMap_TractCA, eval = FALSE}
+
+# rm(list = ls(all = TRUE)) #start with empty workspace
+
+# download shape files from this site
+# https://www.census.gov/geo/maps-data/data/cbf/cbf_tracts.html
+
+# unizip files
+# zipFiles <- list.files() %>%  .[grepl("tract_500k", .)] %>%  .[grepl("\\.zip", .)] 
+# 
+# for (i in 1:length(zipFiles)) {
+#   
+#   unzip(zipFiles[i], exdir = zipFiles[i] %>% sub("\\.zip", "", .))
+#   
+# }
+
+# change procjection
+# http://leginfo.legislature.ca.gov/faces/codes_displayText.xhtml?lawCode=PRC&division=8.&title=&part=&chapter=1.&article=
+# https://nrm.dfg.ca.gov/FileHandler.ashx?DocumentID=109326&inline
+
+EPSG <- rgdal::make_EPSG() %>% 
+  mutate(code = as.factor(as.numeric(code)))
+
+files <- list.files(full.names = TRUE, recursive = TRUE) %>%
+  .[grepl("tract_500k", .)] %>% 
+  .[grepl("\\.shp$", .)]
+
+fileNames <- files %>% basename(.) %>% 
+  gsub("_"," ",.) %>% 
+  gsub("\\b(\\w)", "\\U\\1", ., perl=TRUE) %>% 
+  gsub(".Shp","", .) %>% gsub(" ","",.)
+
+for (i in 1:length(files)) {
+  
+  x_sf <- read_sf(files[i])  %>% 
+    filter(COUNTYFP == "037") %>% 
+    st_transform(crs = 2229) 
+  
+  x <- as(x_sf, 'Spatial')
+  
+  xdata <- x@data
+  
+  x1 <- rgeos::gSimplify(x, tol = 1/100000, topologyPreserve = TRUE)
+  
+  x1 <- rgeos::gBuffer(x1, byid = TRUE, width = 0)
+  
+  x1 <- sp::SpatialPolygonsDataFrame(x1, xdata)
+  
+  x_fortified <- broom:::tidy(x1, region = "NAME") %>% 
+    left_join(x_sf %>% select(GEOID, NAME) %>% st_set_geometry(NULL), 
+              by = c("id" = "NAME")) %>% 
+    setattr(., "comment", fileNames[i]) 
+  
+  assign(fileNames[i], x_fortified)
+  
+  rm(x)
+  rm(x_sf)
+  rm(x1)
+  rm(x_fortified)
+  rm(xdata)
+  
+}
+
+rm(list = c('fileNames','files','i'))
+
+```
+
+```{r plotCorrelation, fig.height=9, fig.width=8, message=FALSE, warning=FALSE, include= TRUE}
+
+# change the order of metrics
+
+StateCombo2013 <- StateCombo %>% 
+  #filter(grepl("13_5YR|PAIRank2013", Metric)) %>% 
+  # select(- Yr) %>% 
+  group_by(GEOid,GEOid2,  GEOdisplaylabel) %>% 
+  spread(Metric , Value ) %>% 
+  filter( GEOid != 'Id')  
+
+corr_eqn <- function(x,y, digits = 2) {
+  corr_coef <- round(cor(x, y), digits = digits)
+  paste("italic(r) == ", corr_coef)
+}
+
+labels = data.frame(x = 20, y = 40, label = corr_eqn(StateCombo2013$StateRank, StateCombo2013$PAIRank2013))
+
+StateCombo2013 %>% 
+  ggplot() +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "gray") +
+  geom_curve(
+    aes(x = 41, y = 54, xend = 52, yend = 53), curvature = -0.2, color = "azure4",
+    size = .5, ncp = 45, 
+    arrow = arrow(length = unit(0.4, "cm"))) +
+  annotate("text", x = 37, y = 54, label = "45 degree line", color = "azure4") +
+  geom_smooth(aes(StateRank, PAIRank2013), method = 'lm', se = FALSE) +
+  geom_point( aes(StateRank, PAIRank2013),
+              alpha = 1,
+              size = 1,
+              shape = 21, fill = NA, stroke = .5,
+              color = "red") + 
+  geom_text(data = labels, aes(x = x, y = y,
+                               label = label), parse = TRUE) +
+  # geom_text(aes(`13_5YR`, PAIRank2013,
+  #               label = GEOdisplaylabel)) +
+  geom_text_repel( data = StateCombo2013, aes(StateRank, PAIRank2013, label = GEOdisplaylabel),
+                   hjust = 0, vjust = 0, size = 4, segment.alpha = .5) +
+  guides(colour = "none") +
+  # ggthemes::theme_tufte() +
+  hrbrthemes::theme_ipsum_rc(plot_title_size = 20, subtitle_size = 15, caption_size = 10) +
+  theme(#axis.text.x = element_text( color = "black", 
+  #                                   size = 10, angle = 00, hjust = .5)
+  #       ,axis.text.y = element_text(color = "black", 
+  #                                   size = 10, angle = 00, hjust = .5)
+  #       ,legend.position = "bottom",
+  #       ,plot.title = element_text(size = 20, face = "bold", colour = "maroon", vjust = -1, hjust = 0)
+  #       ,plot.subtitle = element_text(size = 15, face = "italic", color = "black", hjust = 0)
+        axis.title.y = element_text(face = "bold", size = 15, angle = 90)
+        ,axis.title.x = element_text(face = "bold", size = 15, angle = 00)) +
+  labs(title = "Food Stamps participation rank by State",
+       subtitle = "Program Access Index for 2013 (PAI) Actual vs Estimated",
+       caption = "Source: PAI for 2013 from https://www.cwda.org/sites/main/files/file-attachments/pai2013.pdf \nU.S. Census Bureau, 2009-2013 5-Year American Community Survey",
+       x = "Estimated 2013 PAI Rank based on 2013 5year ACS",
+       y = "2013 PAI Rank from USDA Food and Nutrition Service (FNS)")
+
+```
+
+
+```{r plotCaCounties, fig.height=7, fig.width=8, message=FALSE, warning=FALSE, include= TRUE, eval = TRUE}
+# out.extra='angle=90'
+
+ggplot() +
+  geom_path(data = frt_Ca_Counties, aes(x = long, y = lat, group = group),
+            linetype = "solid",
+            size = 1/6,
+            color = 'purple', #'azure2',
+            alpha = .5) +
+  geom_polygon(data = frt_Ca_Counties %>% inner_join(CountiesCombo, by = c("GEOID"= "GEOid2")),
+               aes(long, lat, group = group, fill = CountyRank),
+               # fill="grey40",
+               colour = "grey90",
+               alpha = .7,
+               size = .05) +
+  scale_fill_continuous(guide = guide_legend(title = "County Rank\nlighter color is worse")) +
+  hrbrthemes::theme_ipsum_rc(plot_title_size = 20, subtitle_size = 15, caption_size = 10) +
+  facet_wrap(~Yr) +
+  theme(strip.text.x = element_text(size = 15, 
+                                    #colour = labelColor, 
+                                    angle = 00,
+                                    hjust = 0#, lineheight = .5
+  ),
+  legend.position = "bottom",
+  axis.text.x = element_text(angle = 00, hjust = 1)) +
+  labs(title = "Estimated Food Stamps participation rank by County",
+       subtitle = "For years 2013 and 2016",
+       caption = "Source: U.S. Census Bureau, 2009-2013 and 2012-2016 5-Year American Community Survey\nNote: some countes have no data available",
+       x = "",
+       y = "")
+
+```
+
+
+```{r segmentChart, fig.height = 11, fig.width = 8, message = FALSE, warning = FALSE, include = TRUE}
+
+Wide_CountiesCombo <- CountiesCombo %>% select(-CountyRank) %>% 
+  spread(Yr, ParticipantsOverPoverty) %>%
+  mutate(County =  gsub(" County, California", "", GEOdisplaylabel),
+         Change = case_when(
+           `13_5YR` > `16_5YR`~ "Decreased",
+           `13_5YR` < `16_5YR`~ "Increased",
+           `13_5YR` == `16_5YR`~ "Unchanged", 
+           TRUE ~ "Other"),
+         Rate2013Pr10KHH = `13_5YR` * 10000,
+         Rate2016Pr10KHH = `16_5YR` * 10000)
+
+avg_2016 <- mean(Wide_CountiesCombo$Rate2016Pr10KHH, na.rm = TRUE) # %>% round( 1) %>% prettyNum(big.mark = ",")
+avg_2013 <- mean(Wide_CountiesCombo$Rate2013Pr10KHH, na.rm = TRUE)
+
+Wide_CountiesCombo %>% 
+  mutate_at(vars(Rate2016Pr10KHH:Rate2013Pr10KHH), funs(replace(., is.na(.), 0))) %>% 
+  mutate(Rate2013Pr10KHH = ifelse(Change == "Other", 0, Rate2013Pr10KHH),
+         Rate2016Pr10KHH = ifelse(Change == "Other", 0, Rate2016Pr10KHH)) %>% 
+  ggplot() +
+  geom_vline(xintercept= avg_2016) +
+  geom_vline(xintercept= avg_2013) +
+  geom_curve(
+    aes(x = 1300, y = "Yuba", xend = avg_2013, yend = "Yuba"), 
+    size = .5, ncp = 45, curvature = -0.2, color = "azure4",
+    arrow = arrow(length = unit(0.2, "cm"))) +
+  annotate("text", x = 950, y = "Yuba",
+           label = paste("State Average in 2013", prettyNum(round(avg_2013, 0),big.mark = ",")),color = "azure4", size = 3) +
+  geom_curve(
+    aes(x = 1980, y = "San Mateo", xend = avg_2016, yend = "Santa Barbara"), 
+    size = .5, ncp = 45, curvature = 0.2, color = "azure4",
+    arrow = arrow(length = unit(0.2, "cm"))) +
+  annotate("text", x = 2210, y = "San Mateo",
+           label = paste("State Average in 2016", prettyNum(round(avg_2016, 0),big.mark = ",")), color = "azure4", size = 3) +
+  geom_segment(aes(x = Rate2013Pr10KHH, xend = Rate2016Pr10KHH, 
+                   y = County, yend = County, color = Change), size = 1,
+               alpha = .8) +
+  scale_x_continuous(labels = comma) +
+  # coord_cartesian(xlim = c(7, 25)) +
+  hrbrthemes::theme_ipsum_rc(plot_title_size = 20, subtitle_size = 15, caption_size = 10) +
+  #facet_wrap(~Yr) +
+  theme(strip.text.x = element_text(size = 5, 
+                                    #colour = labelColor, 
+                                    angle = 00,
+                                    hjust = 0#, lineheight = .5
+  ),
+  ,axis.title.y = element_text(face = "bold", size = 15, angle = 90)
+  ,axis.title.x = element_text(face = "bold", size = 15, angle = 00),
+  #panel.grid.major = element_blank(),
+  legend.position="bottom",
+  axis.text.y = element_text(size = 12, angle = 00, hjust = 1),
+  axis.text.x = element_text(angle = 00, hjust = 1)) +
+  labs(title = "Estimated Food Stamps participation rate by County",
+       subtitle = "For years 2013 and 2016",
+       caption = "Source: U.S. Census Bureau, 2009-2013 and 2012-2016 5-Year American Community Survey\nNote: some countes have no data available",
+       x = "Rate per 10,000 Households",
+       y = "County")
+
+#  mutate(ParticipantsOverPoverty = Final_Est_HH_ReceivingFS/popUnder125PcntPovrtyLevl)
+
+```
