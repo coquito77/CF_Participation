@@ -482,7 +482,10 @@ ggplot() +
                                     hjust = 0#, lineheight = .5
   ),
   legend.position="bottom",
-  axis.text.x = element_text(angle = 90, hjust = 1)) +
+  axis.text.x = element_text(angle = 90, hjust = 1)
+  ,panel.grid.major = element_line(color = "#cccccc")
+  ,panel.grid.minor = element_line(color = "#cccccc")
+  ) +) +
   labs(title = "Food Stamps participation rank by State",
        subtitle = "Program Access Index for 2013 (PAI) vs Estimated for 2013 and 2016",
        caption = "Source: PAI for 2013 from https://www.cwda.org/sites/main/files/file-attachments/pai2013.pdf \nU.S. Census Bureau, 2012-2016 American Community Survey 5-Year Estimates")
@@ -676,10 +679,13 @@ ggplot() +
                                     hjust = 0#, lineheight = .5
   ),
   legend.position = "bottom",
-  axis.text.x = element_text(angle = 00, hjust = 1)) +
+  axis.text.x =  element_blank()
+  ,axis.text.y =  element_blank()
+  ,panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank()) +
   labs(title = "Estimated Food Stamps participation rank by County",
        subtitle = "For years 2013 and 2016",
-       caption = "Source: U.S. Census Bureau, 2009-2013 and 2012-2016 5-Year American Community Survey\nNote: some countes have no data available",
+       caption = "Source: U.S. Census Bureau, 2009-2013 and 2012-2016 5-Year American Community Survey\nNote: some counties have no data available",
        x = "",
        y = "")
 
@@ -738,10 +744,12 @@ Wide_CountiesCombo %>%
   #panel.grid.major = element_blank(),
   legend.position="bottom",
   axis.text.y = element_text(size = 12, angle = 00, hjust = 1),
-  axis.text.x = element_text(angle = 00, hjust = 1)) +
+  axis.text.x = element_text(angle = 00, hjust = 1)
+  ,panel.grid.major = element_line(color = "#cccccc")
+  ,panel.grid.minor = element_line(color = "#cccccc")) +
   labs(title = "Estimated Food Stamps participation rate by County",
        subtitle = "For years 2013 and 2016",
-       caption = "Source: U.S. Census Bureau, 2009-2013 and 2012-2016 5-Year American Community Survey\nNote: some countes have no data available",
+       caption = "Source: U.S. Census Bureau, 2009-2013 and 2012-2016 5-Year American Community Survey\nNote: some counties have no data available",
        x = "Rate per 10,000 Households",
        y = "County")
 
