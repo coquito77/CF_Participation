@@ -39,6 +39,8 @@ setwd("~/GitHub/CF_Participation")
 
 # load("~/abbFileName.RData")
 
+source("helperFuctions.R")
+
 ```
 
 \newcommand\blfootnote[1]{%
@@ -754,5 +756,332 @@ Wide_CountiesCombo %>%
        y = "County")
 
 #  mutate(ParticipantsOverPoverty = Final_Est_HH_ReceivingFS/popUnder125PcntPovrtyLevl)
+
+```
+
+```{r downloadCFData}
+
+
+
+library(tidyverse)
+library(xml2)
+library(rvest)
+library(stringr)
+
+setwd("~/GitHub/CF_Participation") # set the working directory
+
+# download CF 296
+
+fileLinks <-  "https://www.cdss.ca.gov/inforesources/Research-and-Data/CalFresh-Data-Tables/CF296" %>%
+  read_html() %>%
+  html_nodes("a") %>% 
+  html_attr("href") %>% 
+  .[grepl("\\.xls|\\.xlsx",.)] %>% 
+   .[!grepl("Dashboards",.)]
+
+fileLinks <- ifelse(!grepl("http", fileLinks)
+                    ,paste0("http://www.cdss.ca.gov"
+                            ,fileLinks), fileLinks)
+
+for(i in 1:length(fileLinks)){
+  
+  download.file(fileLinks[i],
+                destfile = paste0("./trendsStateFile/", basename(fileLinks[i])),
+                quiet = FALSE
+                ,mode = "wb")
+}
+
+# download DFA 256
+
+fileLinks <- "https://www.cdss.ca.gov/inforesources/Research-and-Data/CalFresh-Data-Tables/DFA256" %>%
+  read_html() %>%
+  html_nodes("a") %>% 
+  html_attr("href") %>% 
+  .[grepl("\\.xls|\\.xlsx",.)] %>% 
+   .[!grepl("Dashboards",.)]
+
+fileLinks <- ifelse(!grepl("http", fileLinks)
+                    ,paste0("http://www.cdss.ca.gov"
+                            ,fileLinks), fileLinks)
+
+for(i in 1:length(fileLinks)){
+  
+  download.file(fileLinks[i],
+                destfile = paste0("./trendsStateFile/",  fileLinks[i] %>% sub("(.*)\\?.*","\\1",.) %>% basename() ),
+                quiet = FALSE
+                ,mode = "wb")
+}
+
+```
+
+
+```{r plotCF_rpt_data, cache = TRUE}
+
+library(tidyverse)
+
+setwd("~/GitHub/CF_Participation") # set the working directory
+
+startTime <- Sys.time() # start timer
+
+Exl_cf296_data <- list.files("./trendsStateFile/", full.names = TRUE) %>% 
+  .[grepl("xlsx", .)] %>%
+  .[grepl("CF296", .)] %>% 
+  .[!grepl("~", .)] %>%   
+  map_df( readxl::read_excel,sheet = "Data", col_types = "text", .id = "file") %>% 
+  left_join( list.files("./trendsStateFile/", full.names = TRUE)  %>% 
+               .[grepl("xlsx", .)] %>%
+               .[grepl("CF296", .)] %>% 
+               .[!grepl("~", .)] %>% 
+               basename() %>% as.tibble() %>% rownames_to_column(var = "file")) %>% 
+  setNames(.[4,] %>% as.character())
+
+listOfAttr <-  paste(names(Exl_cf296_data),
+                     Exl_cf296_data[1,] %>% as.vector()
+                     ,Exl_cf296_data[2,] %>% as.vector()
+                     ,Exl_cf296_data[3,] %>% as.vector()
+                     ,Exl_cf296_data[4,] %>% as.vector(), sep = "; ")
+
+Exl_cf296_data <- Exl_cf296_data %>%  
+  setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+  setNames(make.names(names(.))) %>% 
+  select(Date:CountyName,CountyCode:ReportMonth, ExlFile = CF296FY1617xlsx,
+         Cell1, Cell3, Cell4, Cell74, Cell75, Cell76, Cell91, Cell92, Cell93) %>% 
+  mutate_at(vars(Cell1:Cell93),
+            funs(as.numeric(as.character(.)))) %>% 
+  filter(!is.na(Cell76)) %>% 
+  mutate_at(vars(Date, ReportMonth ),
+            funs(as.Date(as.numeric(as.character(.)), origin = "1899-12-30"))) %>% 
+  data.table::setattr(., "comment", listOfAttr)
+
+Sys.time() - startTime # Time difference of 1.214818 secs
+
+summary(Exl_cf296_data)
+str(Exl_cf296_data)
+attributes(Exl_cf296_data)
+
+startTime <- Sys.time() # start timer
+
+Exl_dfa256 <- list.files("./trendsStateFile/", full.names = TRUE) %>% 
+     .[grepl("xlsx|xls", .)] %>%
+     .[grepl("DFA256", .)] %>% 
+    .[!grepl("~", .)]
+
+Exl_dfa256_shts <- Exl_dfa256 %>%  lapply(.,  readxl::excel_sheets)
+
+names(Exl_dfa256_shts) <- Exl_dfa256
+
+Exl_dfa256_shts <-  Exl_dfa256_shts %>% unlist %>%
+  .[grepl("^\\D{3}\\d{2}$|^Data$", .)] %>%
+  as.data.frame %>% 
+  rownames_to_column("Path") %>% 
+  setNames(c("Path","sheet"))
+
+Exl_dfa256_paths <- Exl_dfa256_shts$Path %>% sub("\\d{1,2}$","",.)
+
+Exl_dfa256_shts <- Exl_dfa256_shts$sheet %>% as.character()
+
+for(i in 1:length(Exl_dfa256_shts)){
+  
+  x <- readxl::read_excel(Exl_dfa256_paths[i]
+                          ,sheet = Exl_dfa256_shts[i]
+                          #,range = "A1:M66"
+                          ,col_types = "text")
+  
+  FirstRowPosition <- unique(which(Vectorize(function(x) x %in% c("Data Cell", "County"))(x),
+                                   arr.ind=TRUE)[,1]) %>% tail(1)
+  
+  LastRowPosition <- unique(which(Vectorize(function(x) x %in% "Yuba")(x),
+                                  arr.ind=TRUE)[,1]) %>% tail(1)
+  
+  col_CasesOpen <- which(apply(x, 2, function(x) any(grepl("Total", x)))) %>% head(1)
+
+  x <- x %>% 
+    setNames(.[FirstRowPosition,]%>% unlist() %>% as.character()) %>% 
+    setNames(gsub("[^[:alnum:]]", perl = TRUE, "", names(.))) %>% 
+    setNames(make.names(names(.), unique = TRUE)) 
+  
+  print(names(x)[1:10])
+  print(paste(str_pad(i, 3, pad = "0"), ncol(x), col_CasesOpen, Exl_dfa256_paths[i], Exl_dfa256_shts[i], sep = "; "))
+}
+
+# source("helperFuctions.R")  # County
+
+all_tables <- vector("list", length = (length(Exl_dfa256_paths)))
+
+for(i in 1:length(Exl_dfa256_paths)){
+  
+   if (i< 157) {
+    
+    print("CF_DFA256_Clean1")
+    
+    print(i)
+    
+    all_tables[[i]] <-  CF_DFA256_Clean1(x) 
+
+   }  else if ( i>= 157) {
+
+    
+    print("CF_DFA256_Clean2")
+    
+    print(i)
+    
+    all_tables[[i]] <-  CF_DFA256_Clean2(x)
+    
+  } else
+    print("not found")
+  
+}
+
+Sys.time() - startTime # Time difference of 59.77615 secs
+
+# make a df
+Exl_dfa256_Data <- all_tables %>% # head(1000) %>%
+  plyr::ldply(data.frame) %>% 
+  filter(County != "Data Cell") %>% 
+  filter(!is.na(County)) %>% 
+  filter(County != "County") %>% 
+  mutate(County = sub("[a-z]{1}/$", "", County),
+         County = trimws(County) ) %>% 
+  mutate_if(is.character, as.factor)
+
+cf_comboData <- Exl_dfa256_Data %>% 
+  select(County,  TotalcasesOpen = total, ReportMonth, path ) %>% 
+  bind_rows(Exl_cf296_data %>% 
+              select(County = CountyName, TotalcasesOpen = Cell76, ReportMonth) %>%  
+              mutate(path = "CF 296")) %>% 
+  mutate_if(is.character, as.factor)
+
+
+cf_comboData %>% filter(County == "Statewide") %>%
+  mutate(Year = format(ReportMonth, "%Y"),
+         Month = format(ReportMonth, "%m")) %>% 
+  count(Year, Month) %>% 
+  spread(Month, n)
+
+cf_comboData %>% filter(County == "Statewide") %>%
+  mutate(Year = format(ReportMonth, "%Y"),
+         Month = format(ReportMonth, "%m"),
+         reportType = ifelse(grepl("DFA", path),"DFA 256","CF 296")) %>% 
+  select(Year, Month, TotalcasesOpen, reportType) %>% 
+  spread(Month, TotalcasesOpen) %>% 
+  arrange(reportType, Year)
+
+cf_comboData %>% filter(County == "Los Angeles") %>%
+  mutate(Year = format(ReportMonth, "%Y"),
+         Month = format(ReportMonth, "%m"),
+         reportType = ifelse(grepl("DFA", path),"DFA 256","CF 296")) %>% 
+  select(Year, Month, TotalcasesOpen, reportType) %>% 
+  spread(Month, TotalcasesOpen) %>% 
+  arrange(reportType, Year) # check gap between June and July 2012, June 2012 should be 177,357
+
+levels(cf_comboData$County)
+
+cf_comboData <- cf_comboData %>% 
+  mutate(County = factor(County, levels = c("Statewide", "Alameda", "Alpine",
+                                            "Amador", "Butte", "Calaveras",
+                                            "Colusa","Contra Costa", "Del Norte", 
+                                            "El Dorado", "Fresno", "Glenn", 
+                                            "Humboldt", "Imperial", "Inyo", 
+                                            "Kern", "Kings", "Lake", "Lassen", 
+                                            "Los Angeles", "Madera", "Marin", 
+                                            "Mariposa", "Mendocino", "Merced",
+                                            "Modoc", "Mono", "Monterey", "Napa",
+                                            "Nevada", "Orange", "Placer", 
+                                            "Plumas", "Riverside", "Sacramento",
+                                            "San Benito", "San Bernardino", 
+                                            "San Diego", "San Francisco", 
+                                            "San Joaquin", "San Luis Obispo", 
+                                            "San Mateo", "Santa Barbara", 
+                                            "Santa Clara", "Santa Cruz", "Shasta",
+                                            "Sierra", "Siskiyou", "Solano", "Sonoma", 
+                                            "Stanislaus", "Sutter", "Tehama", 
+                                            "Trinity", "Tulare", "Tuolumne",
+                                            "Ventura", "Yolo", "Yuba")))
+
+levels(cf_comboData$County)
+
+
+```
+
+```{r plotTopChangeChart, fig.height = 11, fig.width = 8, message = FALSE, warning = FALSE, include = TRUE, cache = FALSE}
+
+LrsConversionPeriod <- data.frame(LRS_ConversionStarts = as.Date("2015-09-01"),
+                                  LRS_ConversionEnds = as.Date("2016-07-31"),
+                                  County = factor("Los Angeles",
+                                                  levels = c(unique(as.character(cf_comboData$County)))))
+
+tmp <- cf_comboData %>% 
+  mutate(reportType = ifelse(grepl("DFA", path),"DFA 256","CF 296"))
+
+Top <- cf_comboData %>%
+  group_by(County) %>%
+  summarize(allTotalcasesOpen = sum(TotalcasesOpen, na.rm = TRUE)) %>%
+  arrange(desc(allTotalcasesOpen)) %>% 
+  slice(1:9) %>%
+  inner_join(tmp %>%
+                    group_by(County, reportType) %>%
+                    slice(1) %>%
+                    ungroup() %>%
+                    select(County, ReportMonth, reportType, firstMonth = TotalcasesOpen)
+             , by = c("County")) %>% 
+  select(County, reportType, firstMonth) %>% 
+      left_join(cf_comboData %>% 
+               mutate(reportType = ifelse(grepl("DFA", path),"DFA 256","CF 296"))) %>% 
+  mutate(changeFromFirstMonth = (TotalcasesOpen-firstMonth)/firstMonth) 
+
+Top %>%
+  ggplot() +
+  geom_line(data = Top  %>% 
+              filter(reportType  == "DFA 256") %>% 
+              select(ReportMonth, changeFromFirstMonth, County1 = County)
+            ,aes(x =  ReportMonth
+                 , y = changeFromFirstMonth,
+                 group = County1)
+            , color = "grey"
+            ,alpha = .5
+            ,show.legend = TRUE) +
+  geom_line(data = Top  %>% 
+              filter(reportType  == "CF 296") %>% 
+              select(ReportMonth, changeFromFirstMonth, County1 = County)
+            ,aes(x =  ReportMonth
+                 , y = changeFromFirstMonth,
+                 group = County1)
+            , color = "grey"
+            ,alpha = .5
+            ,show.legend = TRUE) +
+  geom_line(aes(x =  ReportMonth
+                , y = changeFromFirstMonth
+                , colour = reportType)
+            ,alpha = .5
+            ,show.legend = TRUE) +
+  geom_point(aes(x =  ReportMonth
+                 , y = changeFromFirstMonth
+                 , colour = reportType
+                 # , shape = as.character(rank)
+  ), size = .3
+  , stroke = .03
+  , shape = 21
+  , alpha = .5
+  ,show.legend = FALSE) +
+  geom_rect(data = LrsConversionPeriod,
+            aes(xmin = LRS_ConversionStarts,
+                xmax = LRS_ConversionEnds,
+                ymin = -Inf,
+                ymax = Inf ,
+                #colour = NA,
+                fill = "LRS conversion period"),
+            alpha = .2) +
+  scale_fill_manual('LRS conversion period',
+                    values = 'yellow',
+                    guide = guide_legend(override.aes = list(alpha = 1))) +
+  facet_wrap(~ County
+             ,scales = "free") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "CalFresh Open cases by top counties",
+       subtitle = "and month",
+       y = "Percent change from July 2002"
+       ,color = "State Report") +
+  theme_CF() +
+  NULL
 
 ```
